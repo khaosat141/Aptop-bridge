@@ -1,0 +1,197 @@
+with tokens(underlying_name,contract,decimals) as (
+    values
+    ('USDC',0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e,1e6),
+    ('USDT',0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7,1e6),
+    ('BTCb',0x152b9d0FdC40C096757F570A51E494bd4b943E50,1e8),
+    ('opUSDC',0x7f5c764cbc14f9669b88837ca1490cca17c31607,1e6),
+    ('WETH',0x4200000000000000000000000000000000000006,1e18),
+    ('ETH',0x0000000000000000000000000000000000000000,1e18),
+    ('arbUSDC',0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8,1e6),
+    ('arbWETH',0x82af49447d8a07e3bd95bd0d56f35241523fbab1,1e18),
+    ('polyUSDT',0xc2132d05d31c914a87c6611c10748aeb04b58e8f,1e6),
+    ('polyUSDC',0x2791bca1f2de4661ed88a30c99a7a9449aa84174, 1e6),
+    ('bnbUSDC',0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d,1e18),
+    ('bscUSDT',0x55d398326f99059ff775485246999027b3197955,1e18),
+    ('USDD',0xd17479997F34dd9156Deef8F95A52D81D265be9c,1e18),
+    ('mWETH',0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2,1e18),
+    ('WBTC',0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599,1e18),
+    ('mUSDC',0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48,1e6),
+    ('mUSDD',0x0C10bF8FcB7Bf5412187A595ab97a3609160b5c6,1e18),
+    ('mUSDT',0xdAC17F958D2ee523a2206206994597C13D831ec7,1e6)
+),
+btc_price as (
+    select day, max(price) as price from prices.usd_daily
+    where symbol='BTC'
+    group by 1
+),
+eth_price as (
+    select day, max(price) as price from prices.usd_daily
+    where symbol='ETH'
+    group by 1
+),
+cake_price as (
+    select day, max(price) as price from prices.usd_daily
+    where symbol='CAKE'
+    group by 1
+),
+avax_apt_tx as (
+select address, sum(amount) as amount from 
+    (select "from" as address, sum(_amountLD/t.decimals) as amount from aptos_bridge_avalanche_c.TokenBridge_call_sendToAptos apt
+    join erc20_avalanche_c.evt_transfer at on at.evt_tx_hash=apt.call_tx_hash
+    join tokens t on t.contract=_token
+    group by 1
+    
+    union all
+    
+    select address, sum(amount) as amount from (
+        select distinct _from as address,(_amount/1e8)*price as amount from bitcoinbridge_avalanche_c.BTCbProxyOFT_evt_SendToChain
+        join btc_price btc on btc.day=date_trunc('day',evt_block_time)
+        where _dstChainId=108)
+    group by 1)
+group by 1
+),
+op_apt_tx as (
+select address, sum(volume) as volume from 
+    (select address, sum(value) as volume from (
+        select "from" as address,
+        CASE
+            WHEN underlying_name='ETH' or underlying_name='WETH' THEN (amountLD/t.decimals)*eth.price
+            ELSE amountLD/t.decimals
+        END as value
+        from aptos_pontem_bridge_optimism.TokenBridge_evt_Send apt
+        join tokens t on t.contract=token
+        join eth_price eth on eth.day=date_trunc('day',evt_block_time)
+    )
+    group by 1
+    
+    UNION ALL 
+    
+    select address, sum(amount) as volume from (
+        select evt_tx_from as address, (value/1e8)*btc.price as amount from optimism.logs l
+        join erc20_optimism.evt_transfer et on et.evt_tx_hash=tx_hash
+        join btc_price btc on btc.day=date_trunc('day',evt_block_time)
+        where l.contract_address=0x2297aEbD383787A160DD0d9F71508148769342E3 and topic0=0xd81fc9b8523134ed613870ed029d6170cbb73aa6a6bc311b9a642689fb9df59a
+        and topic1=0x000000000000000000000000000000000000000000000000000000000000006c
+    )
+    group by 1)
+group by 1
+),
+arb_apt_tx as (
+select address, sum(volume) as volume from 
+    (select address, sum(value) as volume from (
+        select "from" as address,
+        CASE
+            WHEN underlying_name='ETH' or underlying_name='arbWETH' THEN (amountLD/t.decimals)*eth.price
+            ELSE amountLD/t.decimals
+        END as value
+        from layerzero_arbitrum.AptosTokenBridge_evt_Send apt
+        join tokens t on t.contract=token
+        join eth_price eth on eth.day=date_trunc('day',evt_block_time)
+    )
+    group by 1
+    
+    UNION ALL
+    
+    select address, sum(amount) as amount from (
+        select distinct _from as address,(_amount/1e8)*price as amount from btc_arbitrum.BTCbOFT_evt_SendToChain
+        join btc_price btc on btc.day=date_trunc('day',evt_block_time)
+        where _dstChainId=108)
+    group by 1)
+group by 1
+),
+polygon_apt_tx as (
+select address, sum(volume) as volume from 
+    (select address, sum(value) as volume from (
+        select "from" as address,(amountLD/t.decimals) as value
+        from liquidswap_polygon.TokenBridge_evt_Send apt
+        join tokens t on t.contract=token
+    )
+    group by 1
+    
+    UNION ALL
+    
+    select address, sum(amount) as amount from (
+        select distinct _from as address,(_amount/1e8)*price as amount from btc_polygon.BTCbOFT_evt_SendToChain
+        join btc_price btc on btc.day=date_trunc('day',evt_block_time)
+        where _dstChainId=108)
+    group by 1)
+group by 1
+),
+bsc_apt_tx as (
+select address, sum(volume) as volume from 
+    ((select address, sum(value) as volume from (
+        select "from" as address,(amountLD/t.decimals) as value
+        from layerzero_bnb.AptosTokenBridge_evt_Send apt
+        join tokens t on t.contract=token
+    )
+    group by 1)
+    
+    UNION ALL
+    
+    (select address, sum(amount) as amount from (
+        select distinct _from as address,(_amount/1e8)*btc.price as amount from bnb_bnb.BTCbOFT_evt_SendToChain
+        join btc_price btc on btc.day=date_trunc('day',evt_block_time)
+        where _dstChainId=108)
+    group by 1)
+    
+    UNION ALL
+    
+    (select address, sum(amount) as amount from (
+        select distinct _from as address,(_amount/1e18)*cake.price as amount from pancakeswap_vcake_bnb.CakeProxyOFT_evt_SendToChain
+        join cake_price cake on cake.day=date_trunc('day',evt_block_time)
+        where _dstChainId=108)
+    group by 1))
+group by 1
+),
+eth_apt_tx as (
+select address, sum(volume) as volume from 
+    (select address, sum(value) as volume from (
+        select "from" as address,
+        CASE
+            WHEN underlying_name='ETH' or underlying_name='mWETH' THEN (amountLD/t.decimals)*eth.price
+            WHEN underlying_name='WBTC' THEN (amountLD/t.decimals)*btc.price
+            ELSE amountLD/t.decimals
+        END as value
+        from aptos_bridge_ethereum.TokenBridge_evt_Send apt
+        join tokens t on t.contract=token
+        join btc_price btc on btc.day=date_trunc('day',evt_block_time)
+        join eth_price eth on eth.day=date_trunc('day',evt_block_time)
+    )
+    group by 1 
+    
+    UNION ALL 
+    
+    select address, sum(amount) as volume from (
+        select "from" as address, (value/1e8)*btc.price as amount from ethereum.logs l
+        join erc20_ethereum.evt_transfer et on et.evt_tx_hash=tx_hash
+        join btc_price btc on btc.day=date_trunc('day',evt_block_time)
+        where l.contract_address=0x2297aEbD383787A160DD0d9F71508148769342E3 and topic0=0xd81fc9b8523134ed613870ed029d6170cbb73aa6a6bc311b9a642689fb9df59a
+        and topic1=0x000000000000000000000000000000000000000000000000000000000000006c
+    )
+    group by 1)
+group by 1
+),
+
+all_chains as (
+    select all.address,COALESCE(avax.amount,0) as avax_volume, COALESCE(op.volume,0) as op_volume, COALESCE(arb.volume,0) as arb_volume, 
+            COALESCE(poly.volume,0) as poly_volume, COALESCE(bsc.volume,0) as bsc_volume, COALESCE(eth.volume,0) as eth_volume
+    from (select address from avax_apt_tx union 
+      select address from op_apt_tx union
+      select address from arb_apt_tx union
+      select address from polygon_apt_tx union
+      select address from bsc_apt_tx union
+      select address from eth_apt_tx
+     ) all left outer join avax_apt_tx avax on all.address=avax.address
+     left outer join op_apt_tx op on all.address = op.address 
+     left outer join arb_apt_tx arb on all.address = arb.address 
+     left outer join polygon_apt_tx poly on all.address = poly.address 
+     left outer join bsc_apt_tx bsc on all.address=bsc.address
+     left outer join eth_apt_tx eth on all.address=eth.address
+)
+
+select address,
+        avax_volume+op_volume+bsc_volume+eth_volume+arb_volume+poly_volume as total_volume,
+        avax_volume, op_volume,arb_volume, poly_volume, bsc_volume, eth_volume
+from all_chains
+order by total_volume desc
+limit 1000000
